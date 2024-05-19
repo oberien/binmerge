@@ -1,11 +1,13 @@
-use std::{io, mem, panic};
+use std::{io, panic, thread};
 use std::fmt::Write;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Bytes, Read, Seek, SeekFrom, Stdout};
 use std::iter::Zip;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use crossbeam_channel::{Receiver, Select};
 use crossterm::event;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -16,9 +18,10 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::symbols::border;
 use ratatui::Terminal;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::widgets::block::Title;
+use binmerge::range_tree::RangeTree;
 
 #[derive(clap::Parser)]
 struct Args {
@@ -58,12 +61,15 @@ struct App {
     name1: String,
     name2: String,
     exit: bool,
-    last_data_height: u16,
-    diff_iter: DiffIter,
+    shown_data_height: u16,
     pos: u64,
     len: u64,
+    diffs: RangeTree<u64>,
+    all_diffs_loaded: bool,
     file1: RandomAccessFile,
     file2: RandomAccessFile,
+    diff_rx: Option<Receiver<Range<u64>>>,
+    event_rx: Receiver<Event>,
 }
 impl App {
     fn new(args: Args) -> App {
@@ -71,8 +77,8 @@ impl App {
             OpenOptions::new().create(false).read(true).write(true).append(false)
                 .open(path).unwrap()
         }
-        // _technically_ there is a TOCTOU if the files get exchanged between both openings,
-        // but there's no easy way to fix it
+        // _Technically_ there is a TOCTOU if the files get exchanged between first and second open,
+        // but there's no easy way to fix it.
         // Windows has ReOpenFile to get a new handle with a separate cursor
         // Linux needs to use pread / pwrite to not disturb the cursor
         let mut a = open_write(&args.file1);
@@ -86,38 +92,63 @@ impl App {
         b.seek(SeekFrom::Start(0)).unwrap();
         assert_eq!(alen, blen, "files have different lengths");
 
+        // diff thread
+        let (diff_tx, diff_rx) = crossbeam_channel::unbounded();
+        thread::spawn(move || {
+            let diff_iter = DiffIter::new(a2, b2);
+            for part in diff_iter {
+                diff_tx.send(part).unwrap();
+            }
+        });
+
+        // event thread
+        let (event_tx, event_rx) = crossbeam_channel::bounded(0);
+        thread::spawn(move || {
+            loop {
+                event_tx.send(event::read().unwrap()).unwrap();
+            }
+        });
+
         App {
             name1: args.file1.to_string_lossy().into_owned(),
             name2: args.file2.to_string_lossy().into_owned(),
             exit: false,
-            last_data_height: 0,
-            diff_iter: DiffIter::new(a2, b2),
+            shown_data_height: 0,
             pos: 0,
             len: alen,
+            diffs: RangeTree::new(),
+            all_diffs_loaded: false,
             file1: RandomAccessFile::try_new(a).unwrap(),
             file2: RandomAccessFile::try_new(b).unwrap(),
+            diff_rx: Some(diff_rx),
+            event_rx,
         }
     }
 
     pub fn run(&mut self, terminal: &mut Tui) {
         while !self.exit {
             terminal.draw(|frame| frame.render_widget(&mut *self, frame.size())).unwrap();
-            match event::read().unwrap() {
-                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    self.handle_key_event(key_event)
+            let mut sel = Select::new();
+            let diff_rx_index = self.diff_rx.as_ref()
+                .map(|diff_rx| sel.recv(diff_rx));
+            let event_rx = sel.recv(&self.event_rx);
+            let op = sel.select();
+            match op.index() {
+                i if Some(i) == diff_rx_index => match op.recv(self.diff_rx.as_ref().unwrap()) {
+                    Ok(diff) => self.diffs.append(diff),
+                    Err(_) => {
+                        self.all_diffs_loaded = true;
+                        self.diff_rx.take();
+                    }
                 }
-                _ => {}
-            };
-        }
-    }
-
-    fn decrease_pos(&mut self, by: u64) {
-        self.pos = self.pos.saturating_sub(by);
-    }
-    fn increase_pos(&mut self, by: u64) {
-        self.pos += by;
-        if self.pos >= self.len {
-            self.pos = (self.len % 16).saturating_sub(16);
+                i if i == event_rx => match op.recv(&self.event_rx).unwrap() {
+                    Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                        self.handle_key_event(key_event)
+                    }
+                    _ => {}
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -126,10 +157,23 @@ impl App {
             KeyCode::Char('q') => self.exit = true,
             KeyCode::Down => self.increase_pos(16),
             KeyCode::Up => self.decrease_pos(16),
-            KeyCode::PageDown => self.increase_pos(self.last_data_height as u64 * 16),
-            KeyCode::PageUp => self.decrease_pos(self.last_data_height as u64 * 16),
+            KeyCode::PageDown => self.increase_pos(self.shown_data_height as u64 * 16),
+            KeyCode::PageUp => self.decrease_pos(self.shown_data_height as u64 * 16),
             _ => (),
         }
+    }
+
+    fn decrease_pos(&mut self, by: u64) {
+        self.pos = self.pos.saturating_sub(by);
+        assert_eq!(self.pos % 16, 0);
+    }
+    fn increase_pos(&mut self, by: u64) {
+        self.pos += by;
+        let bytes_shown = self.shown_data_height as u64 * 16;
+        let max_pos = self.len - bytes_shown;
+        let max_pos = max_pos - (max_pos % 16) + 16;
+        self.pos = self.pos.min(max_pos);
+        assert_eq!(self.pos % 16, 0);
     }
 }
 
@@ -169,32 +213,44 @@ impl Widget for &mut App {
             let mut data = vec![0u8; len];
             file.read_exact_at(self.pos, &mut data).unwrap();
 
-            let mut content = String::with_capacity((WIDTH_PER_FILE as usize - 2) * height as usize + height as usize);
-            for chunk in data.chunks(16) {
+            let mut text = Text::default();
+            for (line_index, chunk) in data.chunks(16).enumerate() {
+                let mut line = Line::default();
+
                 // write hex
-                content.push(' ');
+                line.push_span(" ");
+                let mut written = 1;
                 for (i, byte) in chunk.iter().enumerate() {
-                    content.write_fmt(format_args!("{byte:02x}")).unwrap();
-                    content.push(' ');
+                    let mut span = Span::from(format!("{byte:02x} "));
+                    if self.diffs.contains(self.pos + line_index as u64 * 16 + i as u64) {
+                        span = span.red();
+                    }
+                    line.push_span(span);
+                    written += 3;
                     if i == 7 {
-                        content.push(' ');
+                        line.push_span(" ");
+                        written += 1;
                     }
                 }
                 // fill with spaces until ascii part (also handles non-complete chunks)
-                for _ in content.len()..HEX_PART_LEN {
-                    content.push(' ');
+                for _ in written..HEX_PART_LEN {
+                    line.push_span(" ");
                 }
 
                 // write ascii
-                for &byte in chunk {
-                    if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
-                        content.push(byte as char);
+                for (i, &byte) in chunk.iter().enumerate() {
+                    let mut span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
+                        Span::from((byte as char).to_string())
                     } else {
-                        content.push('.');
+                        Span::from(".")
+                    };
+                    if self.diffs.contains(self.pos + line_index as u64 * 16 + i as u64) {
+                        span = span.red();
                     }
+                    line.push_span(span);
                 }
 
-                content.push('\n');
+                text.push_line(line);
             }
 
             let title = Title::from(format!(" {name} ").bold());
@@ -202,10 +258,10 @@ impl Widget for &mut App {
                 .title(title.alignment(Alignment::Left))
                 .borders(Borders::ALL)
                 .border_set(border::THICK);
-            Paragraph::new(content).block(block)
+            Paragraph::new(text).block(block)
         };
 
-        let mut content = String::with_capacity(positions.height as usize * position_len + position_len);
+        let mut content = String::with_capacity(positions.height as usize * position_len);
         content.push('\n');
         for i in 0..positions.height-2 {
             content.write_fmt(format_args!("{: >position_len$x}\n", self.pos + i as u64 * 16)).unwrap();
@@ -213,7 +269,7 @@ impl Widget for &mut App {
         Paragraph::new(content).block(Block::new()).render(positions, buf);
 
         assert_eq!(left.height, right.height);
-        self.last_data_height = left.height - 2;
+        self.shown_data_height = left.height - 2;
         render_file(&self.name1, &self.file1, left.height - 2).render(left, buf);
         render_file(&self.name2, &self.file2, right.height - 2).render(right, buf);
 
@@ -226,11 +282,20 @@ impl Widget for &mut App {
             "  q".blue().bold(),
             " quit ".into(),
         ]).centered().render(instructions, buf);
+
+        // status
+        Line::from(
+            if self.all_diffs_loaded {
+                format!("Found {} diffs", self.diffs.len())
+            } else {
+                format!("Loading diffs, {} so far", self.diffs.len())
+            }
+        ).render(status_line, buf);
     }
 }
 
 #[derive(Debug, Copy, Clone)]
-enum Part {
+enum State {
     /// start, length
     Equal(u64, u64),
     /// start, length
@@ -238,43 +303,45 @@ enum Part {
 }
 struct DiffIter {
     iter: Zip<Bytes<BufReader<File>>, Bytes<BufReader<File>>>,
-    state: Part,
+    state: State,
 }
 impl DiffIter {
     fn new(a: File, b: File) -> DiffIter {
-        let mut a = BufReader::with_capacity(8*1024*1024, a);
-        let mut b = BufReader::with_capacity(8*1024*1024, b);
+        let a = BufReader::with_capacity(8*1024*1024, a);
+        let b = BufReader::with_capacity(8*1024*1024, b);
         DiffIter {
             iter: a.bytes().zip(b.bytes()),
-            state: Part::Equal(0, 0),
+            state: State::Equal(0, 0),
         }
     }
 }
 
 impl Iterator for DiffIter {
-    type Item = Part;
+    type Item = Range<u64>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((a, b)) = self.iter.next() {
             let a = a.unwrap();
             let b = b.unwrap();
             self.state = match (a == b, self.state) {
-                (true, Part::Equal(start, len)) => Part::Equal(start, len + 1),
-                (true, Part::Different(start, len)) => {
-                    self.state = Part::Equal(start + len, 1);
-                    return Some(Part::Different(start, len))
+                (true, State::Equal(start, len)) => State::Equal(start, len + 1),
+                (true, State::Different(start, len_diff)) => {
+                    self.state = State::Equal(start + len_diff, 1);
+                    return Some(start..start + len_diff)
                 }
-                (false, Part::Equal(start, len)) => {
-                    self.state = Part::Different(start + len, 1);
-                    return Some(Part::Equal(start, len))
-                }
-                (false, Part::Different(start, len)) => Part::Different(start, len + 1),
+                (false, State::Equal(start, len)) => State::Different(start + len, 1),
+                (false, State::Different(start, len_diff)) => {
+                    State::Different(start, len_diff + 1)
+                },
             }
         }
-        if let Part::Equal(0, 0) = self.state {
-            None
-        } else {
-            Some(mem::replace(&mut self.state, Part::Equal(0, 0)))
+
+        match self.state {
+            State::Equal(..) => None,
+            State::Different(start, len_diff) => {
+                self.state = State::Equal(0, 0);
+                Some(start..start + len_diff)
+            }
         }
     }
 }
