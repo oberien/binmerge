@@ -216,13 +216,13 @@ impl App {
 
 impl Widget for &mut App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        //      + /foo/bar ----------------------------------------------------------++ baz +
-        // 1330 | XX XX XX XX XX XX XX XX  XX XX XX XX XX XX XX XX  1234567890abcdef || ... |
-        // 1340 | ...                                                                || ... |
-        //      +--------------------------------------------------------------------++-----+
+        //      + /foo/bar -----------------------------------------------------------++ baz +
+        // 1330 | XX XX XX XX XX XX XX XX  XX XX XX XX XX XX XX XX  12345678 90abcdef || ... |
+        // 1340 | ...                                                                 || ... |
+        //      +---------------------------------------------------------------------++-----+
         // < overwrite left with right  > overwrite right with left  q quit
         const HEX_PART_LEN: usize = 1 + 8*3 + 1 + 8*3 + 1;
-        const ASCII_LEN: usize = 16 + 1;
+        const ASCII_LEN: usize = 8 + 1 + 8 + 1;
         const WIDTH_PER_FILE: u16 = 1 + HEX_PART_LEN as u16 + ASCII_LEN as u16 + 1;
         let position_len = self.len.ilog(16) as usize + 1;
 
@@ -297,6 +297,12 @@ impl Widget for &mut App {
                         span = span.on_white();
                     }
                     line.push_span(span);
+
+                    // separator space between first 8 and second 8 hex numbers
+                    if i == 7 {
+                        line.push_span(" ");
+                        written += 1;
+                    }
                 }
 
                 text.push_line(line);
