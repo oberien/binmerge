@@ -21,11 +21,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::widgets::block::Title;
 
+use binmerge::diff_iter::DiffIter;
 use binmerge::range_tree::RangeTree;
-
-use crate::diff_iter::DiffIter;
-
-mod diff_iter;
 
 #[derive(clap::Parser)]
 struct Args {
@@ -69,6 +66,7 @@ struct App {
     pos: u64,
     len: u64,
     diffs: RangeTree<u64>,
+    current_diff_index: Option<usize>,
     all_diffs_loaded: bool,
     file1: RandomAccessFile,
     file2: RandomAccessFile,
@@ -121,6 +119,7 @@ impl App {
             pos: 0,
             len: alen,
             diffs: RangeTree::new(),
+            current_diff_index: None,
             all_diffs_loaded: false,
             file1: RandomAccessFile::try_new(a).unwrap(),
             file2: RandomAccessFile::try_new(b).unwrap(),
@@ -163,6 +162,8 @@ impl App {
             KeyCode::Up => self.decrease_pos(16),
             KeyCode::PageDown => self.increase_pos(self.shown_data_height as u64 * 16),
             KeyCode::PageUp => self.decrease_pos(self.shown_data_height as u64 * 16),
+            KeyCode::Char('N') => self.prev_diff(),
+            KeyCode::Char('n') => self.next_diff(),
             _ => (),
         }
     }
@@ -177,6 +178,38 @@ impl App {
         let max_pos = self.len - bytes_shown;
         let max_pos = max_pos - (max_pos % 16) + 16;
         self.pos = self.pos.min(max_pos);
+        assert_eq!(self.pos % 16, 0);
+    }
+
+    fn prev_diff(&mut self) {
+        self.current_diff_index = Some(match self.current_diff_index {
+            None | Some(0) => self.diffs.len().saturating_sub(1),
+            Some(index) => index - 1,
+        });
+        self.center_diff();
+    }
+    fn next_diff(&mut self) {
+        self.current_diff_index = Some(match self.current_diff_index {
+            Some(index) => (index + 1) % self.diffs.len(),
+            None => 0,
+        });
+        self.center_diff();
+    }
+    fn center_diff(&mut self) {
+        let range = match self.current_diff_index.and_then(|i| self.diffs.get(i)) {
+            Some(range) => range,
+            None => return,
+        };
+        let len = range.end - range.start;
+        let bytes_shown = self.shown_data_height as u64 * 16;
+        if len > bytes_shown - 48 {
+            self.pos = range.start.saturating_sub(32);
+        } else {
+            let top_offset = (bytes_shown - len) / 2;
+            self.pos = range.start.saturating_sub(top_offset);
+        }
+
+        self.pos -= self.pos % 16;
         assert_eq!(self.pos % 16, 0);
     }
 }
@@ -216,6 +249,10 @@ impl Widget for &mut App {
             let len = height as usize * 16;
             let mut data = vec![0u8; len];
             file.read_exact_at(self.pos, &mut data).unwrap();
+            let current_diff_range = self.current_diff_index
+                .and_then(|i| self.diffs.get(i))
+                .cloned()
+                .unwrap_or(0..0);
 
             let mut text = Text::default();
             for (line_index, chunk) in data.chunks(16).enumerate() {
@@ -227,10 +264,15 @@ impl Widget for &mut App {
                 for (i, byte) in chunk.iter().enumerate() {
                     let mut span = Span::from(format!("{byte:02x} "));
                     if self.diffs.contains(self.pos + line_index as u64 * 16 + i as u64) {
-                        span = span.red();
+                        span = span.red().bold();
+                    }
+                    if current_diff_range.contains(&(self.pos + line_index as u64 * 16 + i as u64)) {
+                        span = span.on_white();
                     }
                     line.push_span(span);
                     written += 3;
+
+                    // separator space between first 8 and second 8 hex numbers
                     if i == 7 {
                         line.push_span(" ");
                         written += 1;
@@ -249,7 +291,10 @@ impl Widget for &mut App {
                         Span::from(".")
                     };
                     if self.diffs.contains(self.pos + line_index as u64 * 16 + i as u64) {
-                        span = span.red();
+                        span = span.red().bold();
+                    }
+                    if current_diff_range.contains(&(self.pos + line_index as u64 * 16 + i as u64)) {
+                        span = span.on_white();
                     }
                     line.push_span(span);
                 }
@@ -283,17 +328,28 @@ impl Widget for &mut App {
             " overwrite left with right".into(),
             "  >".blue().bold(),
             " overwrite right with left".into(),
+            "  n".blue().bold(),
+            " next".into(),
+            "  N".blue().bold(),
+            " prev".into(),
             "  q".blue().bold(),
             " quit ".into(),
         ]).centered().render(instructions, buf);
 
         // status
-        Line::from(
+        Line::from(vec![
+            match self.current_diff_index {
+                Some(index) => format!("Looking at diff {} / {}{}   ", index + 1, self.diffs.len(), match self.all_diffs_loaded {
+                    true => "",
+                    false => "?",
+                }),
+                None => "".to_owned(),
+            }.into(),
             if self.all_diffs_loaded {
                 format!("Found {} diffs", self.diffs.len())
             } else {
                 format!("Loading diffs, {} so far", self.diffs.len())
-            }
-        ).render(status_line, buf);
+            }.into(),
+        ]).render(status_line, buf);
     }
 }

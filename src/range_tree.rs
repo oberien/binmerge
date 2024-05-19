@@ -40,6 +40,10 @@ impl<T: Num + LowerBounded + Copy + Ord + Debug> RangeTree<T> {
         self.ranges.len()
     }
 
+    pub fn get(&self, index: usize) -> Option<&Range<T>> {
+        self.ranges.get(index)
+    }
+
     /// Return the index of the smallest range containing the element, or where a range containing
     /// the element should be inserted
     fn lookup_index(&self, element: T) -> usize {
