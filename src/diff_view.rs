@@ -138,7 +138,7 @@ impl Layer<AppCtx> for DiffView {
         ]).centered().render(instructions, buf);
 
         // status
-        let question_mark = ctx.all_diffs_loaded.then_some("").unwrap_or("?");
+        let question_mark = if ctx.all_diffs_loaded { "" } else { "?" };
         Line::from(vec![
             {
                 let diff = match ctx.current_diff_index {
@@ -165,6 +165,7 @@ impl Layer<AppCtx> for DiffView {
 enum FileView {}
 
 impl FileView {
+    #[allow(clippy::too_many_arguments)]
     fn render(
         name: &str, file: &RandomAccessFile, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>,
         diffs: &RangeTree<u64>, merged_into_this: &RangeTree<u64>, merged_from_this: &RangeTree<u64>,
@@ -243,6 +244,7 @@ impl FileView {
 
 enum QuitPopup {}
 impl QuitPopup {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(ctx: &mut AppCtx) -> PopupYesNo<impl FnMut(&mut AppCtx), impl FnMut(&mut AppCtx)> {
         PopupYesNo::new(
             "Quit?",
@@ -258,6 +260,7 @@ impl QuitPopup {
 
 enum ApplyChangesPopup {}
 impl ApplyChangesPopup {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(ctx: &mut AppCtx) -> PopupYesNo<impl FnMut(&mut AppCtx), impl FnMut(&mut AppCtx)> {
         PopupYesNo::new(
             "Apply Changes?",
@@ -276,9 +279,9 @@ impl ApplyChangesPopup {
                 ctx.leave_unmerged.len(),
                 ctx.diffs.len() - ctx.merges_1_into_2.len() - ctx.merges_2_into_1.len() - ctx.leave_unmerged.len(),
                 total = ctx.diffs.len(),
-                q = ctx.all_diffs_loaded.then_some("").unwrap_or("?"),
+                q = if ctx.all_diffs_loaded { "" }  else { "?" },
             ),
-            |ctx| apply_changes(ctx),
+            apply_changes,
             |_| (),
         )
     }

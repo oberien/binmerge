@@ -87,6 +87,7 @@ impl<T: Num + Bounded + Copy + Ord + Debug> RangeTree<T> {
     /// ```
     pub fn lookup_index(&self, element: T) -> usize {
         self.ranges.binary_search_by(|r| {
+            #[allow(clippy::if_same_then_else)]
             if r.end <= element {
                 Ordering::Less
             } else if r.contains(&element) {

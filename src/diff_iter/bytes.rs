@@ -31,7 +31,7 @@ impl Iterator for BytesDiffIter {
     type Item = Range<u64>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((a, b)) = self.iter.next() {
+        for (a, b) in self.iter.by_ref() {
             let a = a.unwrap();
             let b = b.unwrap();
             self.state = match (a == b, self.state) {

@@ -60,21 +60,18 @@ impl Iterator for ThreadedDiffIter {
         'outer: loop {
 
             // get rid of equal bytes
-            'equal: loop {
-                let (a, b) = self.fill_buffs()?;
-                let len = a.len();
-                let pos = a.iter().copied()
-                    .zip(b.iter().copied())
-                    .position(|(a, b)| a != b);
-                match pos {
-                    Some(pos) => {
-                        self.consume(pos);
-                        break 'equal;
-                    }
-                    None => {
-                        self.consume(len);
-                        continue 'outer;
-                    }
+            let (a, b) = self.fill_buffs()?;
+            let len = a.len();
+            let pos = a.iter().copied()
+                .zip(b.iter().copied())
+                .position(|(a, b)| a != b);
+            match pos {
+                Some(pos) => {
+                    self.consume(pos);
+                }
+                None => {
+                    self.consume(len);
+                    continue 'outer;
                 }
             }
 
