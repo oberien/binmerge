@@ -211,7 +211,7 @@ impl App {
 }
 
 const HEX_PART_LEN: usize = 1 + 8*3 + 1 + 8*3 + 1;
-const ASCII_LEN: usize = 8 + 1 + 8 + 1;
+const ASCII_LEN: usize = 1 + 8 + 1 + 8 + 1;
 const WIDTH_PER_FILE: u16 = 1 + HEX_PART_LEN as u16 + ASCII_LEN as u16 + 1;
 
 impl Widget for &mut App {
@@ -303,58 +303,38 @@ impl FileView {
         let mut data = vec![0u8; len];
         self.file.read_exact_at(pos, &mut data).unwrap();
 
-        let mut text = Text::default();
+        let mut hex_text = Text::default();
+        let mut ascii_text = Text::default();
         for (line_index, chunk) in data.chunks(16).enumerate() {
-            let mut line = Line::default();
+            let mut hex_line = Line::default();
+            let mut ascii_line = Line::default();
 
-            // write hex
-            line.push_span(" ");
-            let mut written = 1;
-            for (i, byte) in chunk.iter().enumerate() {
-                let mut span = Span::from(format!("{byte:02x} "));
-                if diffs.contains(pos + line_index as u64 * 16 + i as u64) {
-                    span = span.red().bold();
-                }
-                if current_diff_range.contains(&(pos + line_index as u64 * 16 + i as u64)) {
-                    span = span.on_white();
-                }
-                line.push_span(span);
-                written += 3;
-
-                // separator space between first 8 and second 8 hex numbers
-                if i == 7 {
-                    line.push_span(" ");
-                    written += 1;
-                }
-            }
-            // fill with spaces until ascii part (also handles non-complete chunks)
-            for _ in written..HEX_PART_LEN {
-                line.push_span(" ");
-            }
-
-            // write ascii
-            for (i, &byte) in chunk.iter().enumerate() {
-                let mut span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
+            for (i, byte) in chunk.iter().copied().enumerate() {
+                let mut hex_span = Span::from(format!("{byte:02x} "));
+                let mut ascii_span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
                     Span::from((byte as char).to_string())
                 } else {
                     Span::from(".")
                 };
                 if diffs.contains(pos + line_index as u64 * 16 + i as u64) {
-                    span = span.red().bold();
+                    hex_span = hex_span.red().bold();
+                    ascii_span = ascii_span.red().bold();
                 }
                 if current_diff_range.contains(&(pos + line_index as u64 * 16 + i as u64)) {
-                    span = span.on_white();
+                    hex_span = hex_span.on_white();
+                    ascii_span = ascii_span.on_white();
                 }
-                line.push_span(span);
+                hex_line.push_span(hex_span);
+                ascii_line.push_span(ascii_span);
 
-                // separator space between first 8 and second 8 hex numbers
+                // separator space between first 8 and second 8 bytes
                 if i == 7 {
-                    line.push_span(" ");
-                    written += 1;
+                    hex_line.push_span(" ");
+                    ascii_line.push_span(" ");
                 }
             }
-
-            text.push_line(line);
+            hex_text.push_line(hex_line);
+            ascii_text.push_line(ascii_line);
         }
 
         let title = Title::from(format!(" {} ", self.name).bold());
@@ -362,6 +342,20 @@ impl FileView {
             .title(title.alignment(Alignment::Left))
             .borders(Borders::ALL)
             .border_set(border::THICK);
-        Paragraph::new(text).block(block).render(area, buf);
+        let inner = block.inner(area);
+
+        let layout = Layout::new(Direction::Horizontal, vec![
+            Constraint::Length(1),
+            Constraint::Length(8*3 + 1 + 8*3 - 1),
+            Constraint::Length(2),
+            Constraint::Length(8 + 1 + 8),
+            Constraint::Length(1),
+        ]).split(inner);
+        let hex = layout[1];
+        let ascii = layout[3];
+
+        block.render(area, buf);
+        Paragraph::new(hex_text).render(hex, buf);
+        Paragraph::new(ascii_text).render(ascii, buf);
     }
 }
