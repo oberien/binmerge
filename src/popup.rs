@@ -8,30 +8,38 @@ use ratatui::widgets::block::Title;
 use crate::AppCtx;
 use crate::layers::{Layer, LayerChanges};
 
-pub struct PopupYesNo {
+pub struct PopupYesNo<Y: FnMut(&mut AppCtx), N: FnMut(&mut AppCtx)> {
     title: Title<'static>,
     text: Text<'static>,
+    on_yes: Y,
+    on_no: N,
     yes_selected: bool,
 }
 
-impl PopupYesNo {
-    pub fn new(title: impl Into<Title<'static>>, text: impl Into<Text<'static>>) -> PopupYesNo {
+impl<Y: FnMut(&mut AppCtx), N: FnMut(&mut AppCtx)> PopupYesNo<Y, N> {
+    pub fn new(title: impl Into<Title<'static>>, text: impl Into<Text<'static>>, on_yes: Y, on_no: N) -> PopupYesNo<Y, N> {
         PopupYesNo {
             title: title.into(),
             text: text.into(),
+            on_yes,
+            on_no,
             yes_selected: false,
         }
     }
 }
 
-impl Layer<AppCtx> for PopupYesNo {
-    fn handle_key_event(&mut self, _ctx: &mut AppCtx, layers: &mut LayerChanges<AppCtx>, evt: KeyEvent) {
+impl<Y: FnMut(&mut AppCtx), N: FnMut(&mut AppCtx)> Layer<AppCtx> for PopupYesNo<Y, N> {
+    fn handle_key_event(&mut self, ctx: &mut AppCtx, layers: &mut LayerChanges<AppCtx>, evt: KeyEvent) {
         match evt.code {
             KeyCode::Left | KeyCode::Right => self.yes_selected = !self.yes_selected,
             KeyCode::Esc | KeyCode::Char('q') => layers.pop_layer(),
-            KeyCode::Enter if !self.yes_selected => layers.pop_layer(),
+            KeyCode::Enter if !self.yes_selected => {
+                layers.pop_layer();
+                (self.on_no)(ctx);
+            },
             KeyCode::Enter if self.yes_selected => {
-                todo!()
+                layers.pop_layer();
+                (self.on_yes)(ctx);
             }
             _ => (),
         }
