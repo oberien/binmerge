@@ -62,7 +62,7 @@ impl Layer<AppCtx> for DiffView {
                         "Merged left   <: {:>4}/{total}\n",
                         "Merged right  >: {:>4}/{total}\n",
                         "Unchanged     =: {:>4}/{total}\n",
-                        "UNMERGED    ???: {:>4}/{total}{q}",
+                        "UNMERGED       : {:>4}/{total}{q}",
                     ),
                     ctx.merges_2_into_1.len(),
                     ctx.merges_1_into_2.len(),
@@ -217,12 +217,12 @@ impl FileView {
                     hex_span = hex_span.light_green().bold();
                     ascii_span = ascii_span.light_green().bold();
                 } else if diffs.contains(pos) {
-                    hex_span = hex_span.red().bold();
-                    ascii_span = ascii_span.red().bold();
+                    hex_span = hex_span.light_red().bold();
+                    ascii_span = ascii_span.light_red().bold();
                 }
                 if current_diff_range.contains(&pos) {
-                    hex_span = hex_span.on_white();
-                    ascii_span = ascii_span.on_white();
+                    hex_span = hex_span.on_dark_gray();
+                    ascii_span = ascii_span.on_dark_gray();
                 }
                 hex_line.push_span(hex_span);
                 ascii_line.push_span(ascii_span);
