@@ -1,5 +1,4 @@
 use std::{io, panic, thread};
-use std::fmt::Write;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Stdout};
 use std::ops::Range;
@@ -8,21 +7,20 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use crossbeam_channel::{Receiver, Select};
 use crossterm::event;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{Event, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use positioned_io::{RandomAccessFile, ReadAt};
+use positioned_io::RandomAccessFile;
 use ratatui::backend::CrosstermBackend;
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Stylize;
-use ratatui::symbols::border;
 use ratatui::Terminal;
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
-use ratatui::widgets::block::Title;
 
 use binmerge::diff_iter::DiffIter;
 use binmerge::range_tree::RangeTree;
+
+use crate::diff_view::{DiffView, FileView};
+use crate::layers::Layers;
+
+mod layers;
+mod diff_view;
 
 #[derive(clap::Parser)]
 struct Args {
@@ -57,16 +55,7 @@ fn restore_terminal() {
     crossterm::terminal::disable_raw_mode().unwrap();
 }
 
-enum AppState {
-    Diffing,
-    Confirmation,
-    Applying,
-}
-
-
-
-pub type Tui = Terminal<CrosstermBackend<Stdout>>;
-struct App {
+struct AppCtx {
     exit: bool,
     shown_data_height: u16,
     pos: u64,
@@ -77,11 +66,13 @@ struct App {
     merges_1_into_2: RangeTree<u64>,
     merges_2_into_1: RangeTree<u64>,
     leave_unmerged: RangeTree<u64>,
-    file1: FileView,
-    file2: FileView,
+}
+
+pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+struct App {
     diff_rx: Option<Receiver<Range<u64>>>,
     event_rx: Receiver<Event>,
-    state: AppState,
+    layers: Layers<AppCtx>,
 }
 impl App {
     fn new(args: Args) -> App {
@@ -121,7 +112,8 @@ impl App {
             }
         });
 
-        App {
+
+        let ctx = AppCtx {
             exit: false,
             shown_data_height: 0,
             pos: 0,
@@ -132,17 +124,23 @@ impl App {
             merges_1_into_2: RangeTree::new(),
             merges_2_into_1: RangeTree::new(),
             leave_unmerged: RangeTree::new(),
-            file1: FileView::new(args.file1.to_string_lossy().into_owned(), RandomAccessFile::try_new(a).unwrap()),
-            file2: FileView::new(args.file2.to_string_lossy().into_owned(), RandomAccessFile::try_new(b).unwrap()),
+        };
+        let diff_view = DiffView::new(
+            FileView::new(args.file1.to_string_lossy().into_owned(), RandomAccessFile::try_new(a).unwrap()),
+            FileView::new(args.file2.to_string_lossy().into_owned(), RandomAccessFile::try_new(b).unwrap()),
+        );
+        let mut layers = Layers::new(ctx);
+        layers.push_layer(diff_view);
+        App {
             diff_rx: Some(diff_rx),
             event_rx,
-            state: AppState::Diffing,
+            layers,
         }
     }
 
     pub fn run(&mut self, terminal: &mut Tui) {
-        while !self.exit {
-            terminal.draw(|frame| frame.render_widget(&mut *self, frame.size())).unwrap();
+        while !self.layers.ctx().exit {
+            terminal.draw(|frame| frame.render_widget(&mut self.layers, frame.size())).unwrap();
             let mut sel = Select::new();
             let diff_rx_index = self.diff_rx.as_ref()
                 .map(|diff_rx| sel.recv(diff_rx));
@@ -150,15 +148,15 @@ impl App {
             let op = sel.select();
             match op.index() {
                 i if Some(i) == diff_rx_index => match op.recv(self.diff_rx.as_ref().unwrap()) {
-                    Ok(diff) => self.diffs.append(diff),
+                    Ok(diff) => self.layers.ctx().diffs.append(diff),
                     Err(_) => {
-                        self.all_diffs_loaded = true;
+                        self.layers.ctx().all_diffs_loaded = true;
                         self.diff_rx.take();
                     }
                 }
                 i if i == event_rx => match op.recv(&self.event_rx).unwrap() {
                     Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                        self.handle_key_event(key_event)
+                        self.layers.handle_key_event(key_event)
                     }
                     _ => {}
                 }
@@ -166,40 +164,9 @@ impl App {
             }
         }
     }
+}
 
-    fn handle_key_event(&mut self, evt: KeyEvent) {
-        match evt.code {
-            KeyCode::Char('q') => self.exit = true,
-            KeyCode::Down => self.increase_pos(16),
-            KeyCode::Up => self.decrease_pos(16),
-            KeyCode::PageDown => self.increase_pos(self.shown_data_height as u64 * 16),
-            KeyCode::PageUp => self.decrease_pos(self.shown_data_height as u64 * 16),
-            KeyCode::Char('N') => self.prev_diff(),
-            KeyCode::Char('n') => self.next_diff(),
-            KeyCode::Char('>') => if let Some(index) = self.current_diff_index {
-                self.merges_1_into_2.insert(self.diffs.get(index).unwrap().clone());
-                self.merges_2_into_1.remove_range_exact(self.diffs.get(index).unwrap().clone());
-                self.leave_unmerged.remove_range_exact(self.diffs.get(index).unwrap().clone());
-            }
-            KeyCode::Char('<') => if let Some(index) = self.current_diff_index {
-                self.merges_1_into_2.remove_range_exact(self.diffs.get(index).unwrap().clone());
-                self.merges_2_into_1.insert(self.diffs.get(index).unwrap().clone());
-                self.leave_unmerged.remove_range_exact(self.diffs.get(index).unwrap().clone());
-            }
-            KeyCode::Char('=') => if let Some(index) = self.current_diff_index {
-                self.merges_1_into_2.remove_range_exact(self.diffs.get(index).unwrap().clone());
-                self.merges_2_into_1.remove_range_exact(self.diffs.get(index).unwrap().clone());
-                self.leave_unmerged.insert(self.diffs.get(index).unwrap().clone());
-            }
-            KeyCode::Char('!') => if let Some(index) = self.current_diff_index {
-                self.merges_1_into_2.remove_range_exact(self.diffs.get(index).unwrap().clone());
-                self.merges_2_into_1.remove_range_exact(self.diffs.get(index).unwrap().clone());
-                self.leave_unmerged.remove_range_exact(self.diffs.get(index).unwrap().clone());
-            }
-            _ => (),
-        }
-    }
-
+impl AppCtx {
     fn decrease_pos(&mut self, by: u64) {
         self.pos = self.pos.saturating_sub(by);
         assert_eq!(self.pos % 16, 0);
@@ -243,188 +210,5 @@ impl App {
 
         self.pos -= self.pos % 16;
         assert_eq!(self.pos % 16, 0);
-    }
-}
-
-const HEX_PART_LEN: usize = 1 + 8*3 + 1 + 8*3 + 1;
-const ASCII_LEN: usize = 1 + 8 + 1 + 8 + 1;
-const WIDTH_PER_FILE: u16 = 1 + HEX_PART_LEN as u16 + ASCII_LEN as u16 + 1;
-
-impl Widget for &mut App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        //      + /foo/bar -----------------------------------------------------------++ baz +
-        // 1330 | XX XX XX XX XX XX XX XX  XX XX XX XX XX XX XX XX  12345678 90abcdef || ... |
-        // 1340 | ...                                                                 || ... |
-        //      +---------------------------------------------------------------------++-----+
-        // < overwrite left with right  > overwrite right with left  q quit
-        let position_len = self.len.ilog(16) as usize + 1;
-
-        let all = Layout::new(Direction::Vertical, [
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]).split(area);
-        let files = Layout::new(Direction::Horizontal, [
-            Constraint::Length(position_len as u16),
-            Constraint::Length(1),
-            Constraint::Length(WIDTH_PER_FILE),
-            Constraint::Length(1),
-            Constraint::Length(WIDTH_PER_FILE),
-        ]).split(all[0]);
-
-        let positions = files[0];
-        let left = files[2];
-        let right = files[4];
-        let instructions = all[1];
-        let status_line = all[2];
-
-        let mut content = String::with_capacity(positions.height as usize * position_len);
-        content.push('\n');
-        for i in 0..positions.height-2 {
-            content.write_fmt(format_args!("{: >position_len$x}\n", self.pos + i as u64 * 16)).unwrap();
-        }
-        Paragraph::new(content).block(Block::new()).render(positions, buf);
-
-        assert_eq!(left.height, right.height);
-        self.shown_data_height = left.height - 2;
-        let current_diff_range = self.current_diff_index
-            .and_then(|i| self.diffs.get(i))
-            .cloned()
-            .unwrap_or(0..0);
-        self.file1.render(
-            left, buf, self.pos, current_diff_range.clone(),
-            &self.diffs, &self.merges_2_into_1, &self.merges_1_into_2, &self.leave_unmerged,
-        );
-        self.file2.render(
-            right, buf, self.pos, current_diff_range.clone(),
-            &self.diffs, &self.merges_1_into_2, &self.merges_2_into_1, &self.leave_unmerged,
-        );
-
-        // instructions
-        Line::from(vec![
-            " <".blue().bold(),
-            " overwrite left".into(),
-            "  >".blue().bold(),
-            " overwrite right".into(),
-            "  =".blue().bold(),
-            " leave unmerged".into(),
-            "  !".blue().bold(),
-            " reset this merge".into(),
-            "  n/N".blue().bold(),
-            " next/prev item".into(),
-            // "  m/M".blue().bold(),
-            // " next/prev merge".into(),
-            // "  d/D".blue().bold(),
-            // " next/prev diff".into(),
-            "  q".blue().bold(),
-            " quit ".into(),
-        ]).centered().render(instructions, buf);
-
-        // status
-        let question_mark = self.all_diffs_loaded.then_some("").unwrap_or("?");
-        Line::from(vec![
-            {
-                let diff = match self.current_diff_index {
-                    Some(index) => format!("diff {}", index + 1),
-                    None => "no diff ".to_string(),
-                };
-                format!("Looking at {diff}/{}{}   ", self.diffs.len(), question_mark)
-            }.into(),
-            format!(
-                "Merged {}/{}{}   ",
-                self.merges_1_into_2.len() + self.merges_2_into_1.len() + self.leave_unmerged.len(),
-                self.diffs.len(),
-                question_mark,
-            ).into(),
-            if self.all_diffs_loaded {
-                format!("Found {} diffs", self.diffs.len())
-            } else {
-                format!("Loading diffs, {} so far", self.diffs.len())
-            }.into(),
-        ]).render(status_line, buf);
-    }
-}
-
-struct FileView {
-    name: String,
-    file: RandomAccessFile,
-}
-impl FileView {
-    fn new(name: String, file: RandomAccessFile) -> FileView {
-        FileView { name, file }
-    }
-    fn render(
-        &self, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>,
-        diffs: &RangeTree<u64>, merged_into_this: &RangeTree<u64>, merged_from_this: &RangeTree<u64>,
-        leave_unmerged: &RangeTree<u64>,
-    ) {
-        let len = (area.height as usize - 2) * 16;
-        let mut data = vec![0u8; len];
-        self.file.read_exact_at(pos, &mut data).unwrap();
-
-        let mut hex_text = Text::default();
-        let mut ascii_text = Text::default();
-        for (line_index, chunk) in data.chunks(16).enumerate() {
-            let mut hex_line = Line::default();
-            let mut ascii_line = Line::default();
-
-            for (i, byte) in chunk.iter().copied().enumerate() {
-                let pos = pos + line_index as u64 * 16 + i as u64;
-                let mut hex_span = Span::from(format!("{byte:02x} "));
-                let mut ascii_span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
-                    Span::from((byte as char).to_string())
-                } else {
-                    Span::from(".")
-                };
-                if merged_into_this.contains(pos) {
-                    hex_span = hex_span.yellow().bold();
-                    ascii_span = ascii_span.yellow().bold();
-                } else if merged_from_this.contains(pos) {
-                    hex_span = hex_span.green().bold();
-                    ascii_span = ascii_span.green().bold();
-                } else if leave_unmerged.contains(pos) {
-                    hex_span = hex_span.light_green().bold();
-                    ascii_span = ascii_span.light_green().bold();
-                } else if diffs.contains(pos) {
-                    hex_span = hex_span.red().bold();
-                    ascii_span = ascii_span.red().bold();
-                }
-                if current_diff_range.contains(&pos) {
-                    hex_span = hex_span.on_white();
-                    ascii_span = ascii_span.on_white();
-                }
-                hex_line.push_span(hex_span);
-                ascii_line.push_span(ascii_span);
-
-                // separator space between first 8 and second 8 bytes
-                if i == 7 {
-                    hex_line.push_span(" ");
-                    ascii_line.push_span(" ");
-                }
-            }
-            hex_text.push_line(hex_line);
-            ascii_text.push_line(ascii_line);
-        }
-
-        let title = Title::from(format!(" {} ", self.name).bold());
-        let block = Block::default()
-            .title(title.alignment(Alignment::Left))
-            .borders(Borders::ALL)
-            .border_set(border::THICK);
-        let inner = block.inner(area);
-
-        let layout = Layout::new(Direction::Horizontal, vec![
-            Constraint::Length(1),
-            Constraint::Length(8*3 + 1 + 8*3 - 1),
-            Constraint::Length(2),
-            Constraint::Length(8 + 1 + 8),
-            Constraint::Length(1),
-        ]).split(inner);
-        let hex = layout[1];
-        let ascii = layout[3];
-
-        block.render(area, buf);
-        Paragraph::new(hex_text).render(hex, buf);
-        Paragraph::new(ascii_text).render(ascii, buf);
     }
 }
