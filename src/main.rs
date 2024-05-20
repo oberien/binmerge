@@ -21,6 +21,7 @@ use crate::layers::Layers;
 
 mod layers;
 mod diff_view;
+mod popup;
 
 #[derive(clap::Parser)]
 struct Args {

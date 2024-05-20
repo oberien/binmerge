@@ -3,14 +3,15 @@ use std::ops::Range;
 use crossterm::event::{KeyCode, KeyEvent};
 use positioned_io::{RandomAccessFile, ReadAt};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::prelude::{Line, Span, Stylize, Text};
 use ratatui::symbols::border;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::widgets::block::Title;
 use binmerge::range_tree::RangeTree;
 use crate::AppCtx;
-use crate::layers::{Layer, LayerCtx};
+use crate::layers::{Layer, LayerChanges};
+use crate::popup::PopupYesNo;
 
 pub struct DiffView {
     file1: FileView,
@@ -22,42 +23,60 @@ impl DiffView {
     }
 }
 impl Layer<AppCtx> for DiffView {
-    fn handle_key_event(&mut self, ctx: &mut LayerCtx<AppCtx>, evt: KeyEvent) {
-        let app = ctx.ctx();
+    fn handle_key_event(&mut self, ctx: &mut AppCtx, layers: &mut LayerChanges<AppCtx>, evt: KeyEvent) {
         match evt.code {
-            KeyCode::Char('q') => app.exit = true,
-            KeyCode::Down => app.increase_pos(16),
-            KeyCode::Up => app.decrease_pos(16),
-            KeyCode::PageDown => app.increase_pos(app.shown_data_height as u64 * 16),
-            KeyCode::PageUp => app.decrease_pos(app.shown_data_height as u64 * 16),
-            KeyCode::Char('N') => app.prev_diff(),
-            KeyCode::Char('n') => app.next_diff(),
-            KeyCode::Char('>') => if let Some(index) = app.current_diff_index {
-                app.merges_1_into_2.insert(app.diffs.get(index).unwrap().clone());
-                app.merges_2_into_1.remove_range_exact(app.diffs.get(index).unwrap().clone());
-                app.leave_unmerged.remove_range_exact(app.diffs.get(index).unwrap().clone());
+            KeyCode::Char('q') => ctx.exit = true,
+            KeyCode::Down => ctx.increase_pos(16),
+            KeyCode::Up => ctx.decrease_pos(16),
+            KeyCode::PageDown => ctx.increase_pos(ctx.shown_data_height as u64 * 16),
+            KeyCode::PageUp => ctx.decrease_pos(ctx.shown_data_height as u64 * 16),
+            KeyCode::Char('N') => ctx.prev_diff(),
+            KeyCode::Char('n') => ctx.next_diff(),
+            KeyCode::Char('>') => if let Some(index) = ctx.current_diff_index {
+                ctx.merges_1_into_2.insert(ctx.diffs.get(index).unwrap().clone());
+                ctx.merges_2_into_1.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
+                ctx.leave_unmerged.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
             }
-            KeyCode::Char('<') => if let Some(index) = app.current_diff_index {
-                app.merges_1_into_2.remove_range_exact(app.diffs.get(index).unwrap().clone());
-                app.merges_2_into_1.insert(app.diffs.get(index).unwrap().clone());
-                app.leave_unmerged.remove_range_exact(app.diffs.get(index).unwrap().clone());
+            KeyCode::Char('<') => if let Some(index) = ctx.current_diff_index {
+                ctx.merges_1_into_2.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
+                ctx.merges_2_into_1.insert(ctx.diffs.get(index).unwrap().clone());
+                ctx.leave_unmerged.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
             }
-            KeyCode::Char('=') => if let Some(index) = app.current_diff_index {
-                app.merges_1_into_2.remove_range_exact(app.diffs.get(index).unwrap().clone());
-                app.merges_2_into_1.remove_range_exact(app.diffs.get(index).unwrap().clone());
-                app.leave_unmerged.insert(app.diffs.get(index).unwrap().clone());
+            KeyCode::Char('=') => if let Some(index) = ctx.current_diff_index {
+                ctx.merges_1_into_2.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
+                ctx.merges_2_into_1.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
+                ctx.leave_unmerged.insert(ctx.diffs.get(index).unwrap().clone());
             }
-            KeyCode::Char('!') => if let Some(index) = app.current_diff_index {
-                app.merges_1_into_2.remove_range_exact(app.diffs.get(index).unwrap().clone());
-                app.merges_2_into_1.remove_range_exact(app.diffs.get(index).unwrap().clone());
-                app.leave_unmerged.remove_range_exact(app.diffs.get(index).unwrap().clone());
+            KeyCode::Char('!') => if let Some(index) = ctx.current_diff_index {
+                ctx.merges_1_into_2.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
+                ctx.merges_2_into_1.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
+                ctx.leave_unmerged.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
             }
+            KeyCode::Char('a') => layers.push_layer(PopupYesNo::new(
+                "Apply Changes",
+                format!(
+                    concat!(
+                        "Are you sure you want to apply the merges?\n",
+                        "!!!THIS WILL WRITE TO THE FILES!!!\n",
+                        "\n",
+                        "Merged left   <: {:>4}/{total}\n",
+                        "Merged right  >: {:>4}/{total}\n",
+                        "Unchanged     =: {:>4}/{total}\n",
+                        "UNMERGED    ???: {:>4}/{total}{q}",
+                    ),
+                    ctx.merges_2_into_1.len(),
+                    ctx.merges_1_into_2.len(),
+                    ctx.leave_unmerged.len(),
+                    ctx.diffs.len() - ctx.merges_1_into_2.len() - ctx.merges_2_into_1.len() - ctx.leave_unmerged.len(),
+                    total = ctx.diffs.len(),
+                    q = ctx.all_diffs_loaded.then_some("").unwrap_or("?"),
+                ),
+            )),
             _ => (),
         }
     }
 
-    fn render(&mut self, ctx: &mut LayerCtx<AppCtx>, area: Rect, buf: &mut Buffer) {
-        let app = ctx.ctx();
+    fn render(&mut self, ctx: &mut AppCtx, _layers: &mut LayerChanges<AppCtx>, area: Rect, buf: &mut Buffer) {
 
         const HEX_PART_LEN: usize = 1 + 8*3 + 1 + 8*3 + 1;
         const ASCII_LEN: usize = 1 + 8 + 1 + 8 + 1;
@@ -67,14 +86,14 @@ impl Layer<AppCtx> for DiffView {
         // 1340 | ...                                                                 || ... |
         //      +---------------------------------------------------------------------++-----+
         // < overwrite left with right  > overwrite right with left  q quit
-        let position_len = app.len.ilog(16) as usize + 1;
+        let position_len = ctx.len.ilog(16) as usize + 1;
 
-        let all = Layout::new(Direction::Vertical, [
+        let all = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(1),
         ]).split(area);
-        let files = Layout::new(Direction::Horizontal, [
+        let files = Layout::horizontal([
             Constraint::Length(position_len as u16),
             Constraint::Length(1),
             Constraint::Length(WIDTH_PER_FILE),
@@ -91,23 +110,23 @@ impl Layer<AppCtx> for DiffView {
         let mut content = String::with_capacity(positions.height as usize * position_len);
         content.push('\n');
         for i in 0..positions.height-2 {
-            content.write_fmt(format_args!("{: >position_len$x}\n", app.pos + i as u64 * 16)).unwrap();
+            content.write_fmt(format_args!("{: >position_len$x}\n", ctx.pos + i as u64 * 16)).unwrap();
         }
         Paragraph::new(content).block(Block::new()).render(positions, buf);
 
         assert_eq!(left.height, right.height);
-        app.shown_data_height = left.height - 2;
-        let current_diff_range = app.current_diff_index
-            .and_then(|i| app.diffs.get(i))
+        ctx.shown_data_height = left.height - 2;
+        let current_diff_range = ctx.current_diff_index
+            .and_then(|i| ctx.diffs.get(i))
             .cloned()
             .unwrap_or(0..0);
         self.file1.render(
-            left, buf, app.pos, current_diff_range.clone(),
-            &app.diffs, &app.merges_2_into_1, &app.merges_1_into_2, &app.leave_unmerged,
+            left, buf, ctx.pos, current_diff_range.clone(),
+            &ctx.diffs, &ctx.merges_2_into_1, &ctx.merges_1_into_2, &ctx.leave_unmerged,
         );
         self.file2.render(
-            right, buf, app.pos, current_diff_range.clone(),
-            &app.diffs, &app.merges_1_into_2, &app.merges_2_into_1, &app.leave_unmerged,
+            right, buf, ctx.pos, current_diff_range.clone(),
+            &ctx.diffs, &ctx.merges_1_into_2, &ctx.merges_2_into_1, &ctx.leave_unmerged,
         );
 
         // instructions
@@ -126,30 +145,32 @@ impl Layer<AppCtx> for DiffView {
             // " next/prev merge".into(),
             // "  d/D".blue().bold(),
             // " next/prev diff".into(),
+            "  a".blue().bold(),
+            " apply".into(),
             "  q".blue().bold(),
-            " quit ".into(),
+            " quit".into(),
         ]).centered().render(instructions, buf);
 
         // status
-        let question_mark = app.all_diffs_loaded.then_some("").unwrap_or("?");
+        let question_mark = ctx.all_diffs_loaded.then_some("").unwrap_or("?");
         Line::from(vec![
             {
-                let diff = match app.current_diff_index {
+                let diff = match ctx.current_diff_index {
                     Some(index) => format!("diff {}", index + 1),
                     None => "no diff ".to_string(),
                 };
-                format!("Looking at {diff}/{}{}   ", app.diffs.len(), question_mark)
+                format!("Looking at {diff}/{}{}   ", ctx.diffs.len(), question_mark)
             }.into(),
             format!(
                 "Merged {}/{}{}   ",
-                app.merges_1_into_2.len() + app.merges_2_into_1.len() + app.leave_unmerged.len(),
-                app.diffs.len(),
+                ctx.merges_1_into_2.len() + ctx.merges_2_into_1.len() + ctx.leave_unmerged.len(),
+                ctx.diffs.len(),
                 question_mark,
             ).into(),
-            if app.all_diffs_loaded {
-                format!("Found {} diffs", app.diffs.len())
+            if ctx.all_diffs_loaded {
+                format!("Found {} diffs", ctx.diffs.len())
             } else {
-                format!("Loading diffs, {} so far", app.diffs.len())
+                format!("Loading diffs, {} so far", ctx.diffs.len())
             }.into(),
         ]).render(status_line, buf);
     }
@@ -223,7 +244,7 @@ impl FileView {
             .border_set(border::THICK);
         let inner = block.inner(area);
 
-        let layout = Layout::new(Direction::Horizontal, vec![
+        let layout = Layout::horizontal([
             Constraint::Length(1),
             Constraint::Length(8*3 + 1 + 8*3 - 1),
             Constraint::Length(2),

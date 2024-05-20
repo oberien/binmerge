@@ -7,8 +7,7 @@ pub struct Layers<Ctx> {
     layers: Vec<Box<dyn Layer<Ctx>>>,
     ctx: Ctx,
 }
-pub struct LayerCtx<'a, Ctx> {
-    ctx: &'a mut Ctx,
+pub struct LayerChanges<Ctx> {
     layer_changes: Vec<LayerChange<Ctx>>,
 }
 enum LayerChange<Ctx> {
@@ -17,8 +16,8 @@ enum LayerChange<Ctx> {
 }
 
 pub trait Layer<Ctx> {
-    fn handle_key_event(&mut self, ctx: &mut LayerCtx<Ctx>, evt: KeyEvent);
-    fn render(&mut self, ctx: &mut LayerCtx<Ctx>, area: Rect, buf: &mut Buffer);
+    fn handle_key_event(&mut self, ctx: &mut Ctx, layers: &mut LayerChanges<Ctx>, evt: KeyEvent);
+    fn render(&mut self, ctx: &mut Ctx, layers: &mut LayerChanges<Ctx>, area: Rect, buf: &mut Buffer);
 }
 
 impl<Ctx> Layers<Ctx> {
@@ -27,10 +26,9 @@ impl<Ctx> Layers<Ctx> {
     }
     pub fn handle_key_event(&mut self, evt: KeyEvent) {
         let Some(last) = self.layers.last_mut() else { return };
-        let mut ctx = LayerCtx { ctx: &mut self.ctx, layer_changes: Vec::new() };
-        last.handle_key_event(&mut ctx, evt);
-        let changes = ctx.layer_changes;
-        self.apply_layer_changes(changes);
+        let mut layer_changes = LayerChanges { layer_changes: Vec::new() };
+        last.handle_key_event(&mut self.ctx, &mut layer_changes, evt);
+        self.apply_layer_changes(layer_changes);
     }
     pub fn ctx(&mut self) -> &mut Ctx {
         &mut self.ctx
@@ -41,8 +39,8 @@ impl<Ctx> Layers<Ctx> {
     pub fn pop_layer(&mut self) {
         self.layers.pop();
     }
-    fn apply_layer_changes(&mut self, changes: Vec<LayerChange<Ctx>>) {
-        for change in changes {
+    fn apply_layer_changes(&mut self, changes: LayerChanges<Ctx>) {
+        for change in changes.layer_changes {
             match change {
                 LayerChange::Push(layer) => self.layers.push(layer),
                 LayerChange::Pop => drop(self.layers.pop()),
@@ -51,10 +49,7 @@ impl<Ctx> Layers<Ctx> {
     }
 }
 
-impl<Ctx> LayerCtx<'_, Ctx> {
-    pub fn ctx(&mut self) -> &mut Ctx {
-        self.ctx
-    }
+impl<Ctx> LayerChanges<Ctx> {
     pub fn push_layer(&mut self, layer: impl Layer<Ctx> + 'static) {
         self.layer_changes.push(LayerChange::Push(Box::new(layer)));
     }
@@ -65,11 +60,9 @@ impl<Ctx> LayerCtx<'_, Ctx> {
 
 impl<Ctx> Widget for &mut Layers<Ctx> {
     fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
-        let mut layer_changes = Vec::new();
+        let mut layer_changes = LayerChanges { layer_changes: Vec::new() };
         for layer in &mut self.layers {
-            let mut ctx = LayerCtx { ctx: &mut self.ctx, layer_changes };
-            layer.render(&mut ctx, area, buf);
-            layer_changes = ctx.layer_changes;
+            layer.render(&mut self.ctx, &mut layer_changes, area, buf);
         }
         self.apply_layer_changes(layer_changes);
     }
