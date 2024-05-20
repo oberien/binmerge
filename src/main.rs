@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use crossbeam_channel::{Receiver, Select};
-use crossterm::event;
+use crossterm::{cursor, event};
 use crossterm::event::{Event, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use positioned_io::RandomAccessFile;
@@ -17,9 +17,10 @@ use ratatui::Terminal;
 use binmerge::diff_iter::{BytesDiffIter, MemchrDiffIter, ThreadedDiffIter};
 use binmerge::range_tree::RangeTree;
 
-use crate::diff_view::{DiffView, FileView};
+use crate::diff_view::DiffView;
 use crate::layers::Layers;
 
+mod apply;
 mod layers;
 mod diff_view;
 mod popup;
@@ -67,11 +68,15 @@ fn main() {
 }
 
 fn restore_terminal() {
-    crossterm::execute!(io::stdout(), LeaveAlternateScreen).unwrap();
     crossterm::terminal::disable_raw_mode().unwrap();
+    crossterm::execute!(io::stdout(), LeaveAlternateScreen, cursor::Show).unwrap();
 }
 
 struct AppCtx {
+    name1: String,
+    name2: String,
+    file1: RandomAccessFile,
+    file2: RandomAccessFile,
     exit: bool,
     shown_data_height: u16,
     pos: u64,
@@ -130,6 +135,10 @@ impl App {
 
 
         let ctx = AppCtx {
+            name1: args.file1.to_string_lossy().into_owned(),
+            name2: args.file2.to_string_lossy().into_owned(),
+            file1: RandomAccessFile::try_new(a).unwrap(),
+            file2: RandomAccessFile::try_new(b).unwrap(),
             exit: false,
             shown_data_height: 0,
             pos: 0,
@@ -141,10 +150,7 @@ impl App {
             merges_2_into_1: RangeTree::new(),
             leave_unmerged: RangeTree::new(),
         };
-        let diff_view = DiffView::new(
-            FileView::new(args.file1.to_string_lossy().into_owned(), RandomAccessFile::try_new(a).unwrap()),
-            FileView::new(args.file2.to_string_lossy().into_owned(), RandomAccessFile::try_new(b).unwrap()),
-        );
+        let diff_view = DiffView::new();
         let mut layers = Layers::new(ctx);
         layers.push_layer(diff_view);
         App {
@@ -197,17 +203,19 @@ impl AppCtx {
     }
 
     fn prev_diff(&mut self) {
-        self.current_diff_index = Some(match self.current_diff_index {
-            None | Some(0) => self.diffs.len().saturating_sub(1),
-            Some(index) => index - 1,
-        });
+        self.current_diff_index = match self.current_diff_index {
+            None if self.diffs.is_empty() => None,
+            None | Some(0) => Some(self.diffs.len().saturating_sub(1)),
+            Some(index) => Some(index - 1),
+        };
         self.center_diff();
     }
     fn next_diff(&mut self) {
-        self.current_diff_index = Some(match self.current_diff_index {
-            Some(index) => (index + 1) % self.diffs.len(),
-            None => 0,
-        });
+        self.current_diff_index = match self.current_diff_index {
+            None if self.diffs.is_empty() => None,
+            Some(index) => Some((index + 1) % self.diffs.len()),
+            None => Some(0),
+        };
         self.center_diff();
     }
     fn center_diff(&mut self) {

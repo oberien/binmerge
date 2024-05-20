@@ -10,22 +10,26 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::widgets::block::Title;
 use binmerge::range_tree::RangeTree;
 use crate::AppCtx;
+use crate::apply::apply_changes;
 use crate::layers::{Layer, LayerChanges};
 use crate::popup::PopupYesNo;
 
-pub struct DiffView {
-    file1: FileView,
-    file2: FileView,
-}
+pub struct DiffView {}
 impl DiffView {
-    pub fn new(file1: FileView, file2: FileView) -> DiffView {
-        DiffView { file1, file2 }
+    pub fn new() -> DiffView {
+        DiffView {}
     }
 }
 impl Layer<AppCtx> for DiffView {
     fn handle_key_event(&mut self, ctx: &mut AppCtx, layers: &mut LayerChanges<AppCtx>, evt: KeyEvent) {
         match evt.code {
-            KeyCode::Char('q') => layers.push_layer(QuitPopup::new(ctx)),
+            KeyCode::Char('q') => {
+                if ctx.merges_1_into_2.is_empty() && ctx.merges_2_into_1.is_empty() {
+                    ctx.exit = true;
+                } else {
+                    layers.push_layer(QuitPopup::new(ctx))
+                }
+            },
             KeyCode::Down => ctx.increase_pos(16),
             KeyCode::Up => ctx.decrease_pos(16),
             KeyCode::PageDown => ctx.increase_pos(ctx.shown_data_height as u64 * 16),
@@ -52,7 +56,7 @@ impl Layer<AppCtx> for DiffView {
                 ctx.merges_2_into_1.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
                 ctx.leave_unmerged.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
             }
-            KeyCode::Char('a') => layers.push_layer(ApplyChangesPopup::new(ctx)),
+            KeyCode::Char('a') | KeyCode::Char('w') => layers.push_layer(ApplyChangesPopup::new(ctx)),
             _ => (),
         }
     }
@@ -101,12 +105,13 @@ impl Layer<AppCtx> for DiffView {
             .and_then(|i| ctx.diffs.get(i))
             .cloned()
             .unwrap_or(0..0);
-        self.file1.render(
-            left, buf, ctx.pos, current_diff_range.clone(),
+
+        FileView::render(
+            &ctx.name1, &ctx.file1, left, buf, ctx.pos, current_diff_range.clone(),
             &ctx.diffs, &ctx.merges_2_into_1, &ctx.merges_1_into_2, &ctx.leave_unmerged,
         );
-        self.file2.render(
-            right, buf, ctx.pos, current_diff_range.clone(),
+        FileView::render(
+            &ctx.name2, &ctx.file2, right, buf, ctx.pos, current_diff_range.clone(),
             &ctx.diffs, &ctx.merges_1_into_2, &ctx.merges_2_into_1, &ctx.leave_unmerged,
         );
 
@@ -157,22 +162,17 @@ impl Layer<AppCtx> for DiffView {
     }
 }
 
-pub struct FileView {
-    name: String,
-    file: RandomAccessFile,
-}
+enum FileView {}
+
 impl FileView {
-    pub fn new(name: String, file: RandomAccessFile) -> FileView {
-        FileView { name, file }
-    }
     fn render(
-        &self, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>,
+        name: &str, file: &RandomAccessFile, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>,
         diffs: &RangeTree<u64>, merged_into_this: &RangeTree<u64>, merged_from_this: &RangeTree<u64>,
         leave_unmerged: &RangeTree<u64>,
     ) {
         let len = (area.height as usize - 2) * 16;
         let mut data = vec![0u8; len];
-        self.file.read_exact_at(pos, &mut data).unwrap();
+        file.read_exact_at(pos, &mut data).unwrap();
 
         let mut hex_text = Text::default();
         let mut ascii_text = Text::default();
@@ -218,7 +218,7 @@ impl FileView {
             ascii_text.push_line(ascii_line);
         }
 
-        let title = Title::from(format!(" {} ", self.name).bold());
+        let title = Title::from(format!(" {} ", name).bold());
         let block = Block::default()
             .title(title.alignment(Alignment::Left))
             .borders(Borders::ALL)
@@ -278,7 +278,7 @@ impl ApplyChangesPopup {
                 total = ctx.diffs.len(),
                 q = ctx.all_diffs_loaded.then_some("").unwrap_or("?"),
             ),
-            |_| todo!(),
+            |ctx| apply_changes(ctx),
             |_| (),
         )
     }

@@ -5,6 +5,7 @@ use std::ops::Range;
 use num_traits::{Bounded, Num};
 
 /// A tree of non-overlapping ranges (with gaps)
+#[derive(Debug, Clone, Default)]
 pub struct RangeTree<T> {
     ranges: Vec<Range<T>>,
 }
@@ -52,6 +53,13 @@ impl<T: Num + Bounded + Copy + Ord + Debug> RangeTree<T> {
 
     pub fn len(&self) -> usize {
         self.ranges.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    pub fn into_inner(self) -> Vec<Range<T>> {
+        self.ranges
     }
 
     pub fn get(&self, index: usize) -> Option<&Range<T>> {
