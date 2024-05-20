@@ -57,6 +57,14 @@ fn restore_terminal() {
     crossterm::terminal::disable_raw_mode().unwrap();
 }
 
+enum AppState {
+    Diffing,
+    Confirmation,
+    Applying,
+}
+
+
+
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 struct App {
     exit: bool,
@@ -66,10 +74,14 @@ struct App {
     diffs: RangeTree<u64>,
     current_diff_index: Option<usize>,
     all_diffs_loaded: bool,
+    merges_1_into_2: RangeTree<u64>,
+    merges_2_into_1: RangeTree<u64>,
+    leave_unmerged: RangeTree<u64>,
     file1: FileView,
     file2: FileView,
     diff_rx: Option<Receiver<Range<u64>>>,
     event_rx: Receiver<Event>,
+    state: AppState,
 }
 impl App {
     fn new(args: Args) -> App {
@@ -117,10 +129,14 @@ impl App {
             diffs: RangeTree::new(),
             current_diff_index: None,
             all_diffs_loaded: false,
+            merges_1_into_2: RangeTree::new(),
+            merges_2_into_1: RangeTree::new(),
+            leave_unmerged: RangeTree::new(),
             file1: FileView::new(args.file1.to_string_lossy().into_owned(), RandomAccessFile::try_new(a).unwrap()),
             file2: FileView::new(args.file2.to_string_lossy().into_owned(), RandomAccessFile::try_new(b).unwrap()),
             diff_rx: Some(diff_rx),
             event_rx,
+            state: AppState::Diffing,
         }
     }
 
@@ -160,6 +176,26 @@ impl App {
             KeyCode::PageUp => self.decrease_pos(self.shown_data_height as u64 * 16),
             KeyCode::Char('N') => self.prev_diff(),
             KeyCode::Char('n') => self.next_diff(),
+            KeyCode::Char('>') => if let Some(index) = self.current_diff_index {
+                self.merges_1_into_2.insert(self.diffs.get(index).unwrap().clone());
+                self.merges_2_into_1.remove_range_exact(self.diffs.get(index).unwrap().clone());
+                self.leave_unmerged.remove_range_exact(self.diffs.get(index).unwrap().clone());
+            }
+            KeyCode::Char('<') => if let Some(index) = self.current_diff_index {
+                self.merges_1_into_2.remove_range_exact(self.diffs.get(index).unwrap().clone());
+                self.merges_2_into_1.insert(self.diffs.get(index).unwrap().clone());
+                self.leave_unmerged.remove_range_exact(self.diffs.get(index).unwrap().clone());
+            }
+            KeyCode::Char('=') => if let Some(index) = self.current_diff_index {
+                self.merges_1_into_2.remove_range_exact(self.diffs.get(index).unwrap().clone());
+                self.merges_2_into_1.remove_range_exact(self.diffs.get(index).unwrap().clone());
+                self.leave_unmerged.insert(self.diffs.get(index).unwrap().clone());
+            }
+            KeyCode::Char('!') => if let Some(index) = self.current_diff_index {
+                self.merges_1_into_2.remove_range_exact(self.diffs.get(index).unwrap().clone());
+                self.merges_2_into_1.remove_range_exact(self.diffs.get(index).unwrap().clone());
+                self.leave_unmerged.remove_range_exact(self.diffs.get(index).unwrap().clone());
+            }
             _ => (),
         }
     }
@@ -255,32 +291,51 @@ impl Widget for &mut App {
             .and_then(|i| self.diffs.get(i))
             .cloned()
             .unwrap_or(0..0);
-        self.file1.render(left, buf, self.pos, current_diff_range.clone(), &self.diffs);
-        self.file2.render(right, buf, self.pos, current_diff_range.clone(), &self.diffs);
+        self.file1.render(
+            left, buf, self.pos, current_diff_range.clone(),
+            &self.diffs, &self.merges_2_into_1, &self.merges_1_into_2, &self.leave_unmerged,
+        );
+        self.file2.render(
+            right, buf, self.pos, current_diff_range.clone(),
+            &self.diffs, &self.merges_1_into_2, &self.merges_2_into_1, &self.leave_unmerged,
+        );
 
         // instructions
         Line::from(vec![
             " <".blue().bold(),
-            " overwrite left with right".into(),
+            " overwrite left".into(),
             "  >".blue().bold(),
-            " overwrite right with left".into(),
-            "  n".blue().bold(),
-            " next".into(),
-            "  N".blue().bold(),
-            " prev".into(),
+            " overwrite right".into(),
+            "  =".blue().bold(),
+            " leave unmerged".into(),
+            "  !".blue().bold(),
+            " reset this merge".into(),
+            "  n/N".blue().bold(),
+            " next/prev item".into(),
+            // "  m/M".blue().bold(),
+            // " next/prev merge".into(),
+            // "  d/D".blue().bold(),
+            // " next/prev diff".into(),
             "  q".blue().bold(),
             " quit ".into(),
         ]).centered().render(instructions, buf);
 
         // status
+        let question_mark = self.all_diffs_loaded.then_some("").unwrap_or("?");
         Line::from(vec![
-            match self.current_diff_index {
-                Some(index) => format!("Looking at diff {} / {}{}   ", index + 1, self.diffs.len(), match self.all_diffs_loaded {
-                    true => "",
-                    false => "?",
-                }),
-                None => "".to_owned(),
+            {
+                let diff = match self.current_diff_index {
+                    Some(index) => format!("diff {}", index + 1),
+                    None => "no diff ".to_string(),
+                };
+                format!("Looking at {diff}/{}{}   ", self.diffs.len(), question_mark)
             }.into(),
+            format!(
+                "Merged {}/{}{}   ",
+                self.merges_1_into_2.len() + self.merges_2_into_1.len() + self.leave_unmerged.len(),
+                self.diffs.len(),
+                question_mark,
+            ).into(),
             if self.all_diffs_loaded {
                 format!("Found {} diffs", self.diffs.len())
             } else {
@@ -298,7 +353,11 @@ impl FileView {
     fn new(name: String, file: RandomAccessFile) -> FileView {
         FileView { name, file }
     }
-    fn render(&self, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>, diffs: &RangeTree<u64>) where Self: Sized {
+    fn render(
+        &self, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>,
+        diffs: &RangeTree<u64>, merged_into_this: &RangeTree<u64>, merged_from_this: &RangeTree<u64>,
+        leave_unmerged: &RangeTree<u64>,
+    ) {
         let len = (area.height as usize - 2) * 16;
         let mut data = vec![0u8; len];
         self.file.read_exact_at(pos, &mut data).unwrap();
@@ -310,17 +369,27 @@ impl FileView {
             let mut ascii_line = Line::default();
 
             for (i, byte) in chunk.iter().copied().enumerate() {
+                let pos = pos + line_index as u64 * 16 + i as u64;
                 let mut hex_span = Span::from(format!("{byte:02x} "));
                 let mut ascii_span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
                     Span::from((byte as char).to_string())
                 } else {
                     Span::from(".")
                 };
-                if diffs.contains(pos + line_index as u64 * 16 + i as u64) {
+                if merged_into_this.contains(pos) {
+                    hex_span = hex_span.yellow().bold();
+                    ascii_span = ascii_span.yellow().bold();
+                } else if merged_from_this.contains(pos) {
+                    hex_span = hex_span.green().bold();
+                    ascii_span = ascii_span.green().bold();
+                } else if leave_unmerged.contains(pos) {
+                    hex_span = hex_span.light_green().bold();
+                    ascii_span = ascii_span.light_green().bold();
+                } else if diffs.contains(pos) {
                     hex_span = hex_span.red().bold();
                     ascii_span = ascii_span.red().bold();
                 }
-                if current_diff_range.contains(&(pos + line_index as u64 * 16 + i as u64)) {
+                if current_diff_range.contains(&pos) {
                     hex_span = hex_span.on_white();
                     ascii_span = ascii_span.on_white();
                 }

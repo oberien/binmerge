@@ -2,15 +2,14 @@ use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::ops::Range;
 
-use num_traits::bounds::LowerBounded;
-use num_traits::Num;
+use num_traits::{Bounded, Num};
 
 /// A tree of non-overlapping ranges (with gaps)
 pub struct RangeTree<T> {
     ranges: Vec<Range<T>>,
 }
 
-impl<T: Num + LowerBounded + Copy + Ord + Debug> RangeTree<T> {
+impl<T: Num + Bounded + Copy + Ord + Debug> RangeTree<T> {
     pub fn new() -> RangeTree<T> {
         RangeTree { ranges: Vec::new() }
     }
@@ -26,14 +25,29 @@ impl<T: Num + LowerBounded + Copy + Ord + Debug> RangeTree<T> {
         RangeTree { ranges }
     }
 
-    /// Append a range which must be larger than all other ranges added so far
+    /// Append a range which must be larger than all other ranges added so far.
+    ///
+    /// O(1)
     pub fn append(&mut self, range: Range<T>) {
         let last_val = self.ranges.last()
             .map(|r| r.end)
             .unwrap_or_else(|| T::min_value());
+        assert!(range.start <= range.end);
         assert!(range.start >= last_val);
         assert!(range.start <= range.end);
         self.ranges.push(range);
+    }
+
+    /// Insert a range into this tree. The range must not overlap any existing range.
+    ///
+    /// O(n)
+    pub fn insert(&mut self, range: Range<T>) {
+        let index = self.lookup_index(range.start);
+        if index != 0 {
+            assert!(self.ranges[index-1].end <= range.start);
+        }
+        assert!(range.end <= self.ranges.get(index).map(|r| r.start).unwrap_or(T::max_value()));
+        self.ranges.insert(index, range);
     }
 
     pub fn len(&self) -> usize {
@@ -45,8 +59,25 @@ impl<T: Num + LowerBounded + Copy + Ord + Debug> RangeTree<T> {
     }
 
     /// Return the index of the smallest range containing the element, or where a range containing
-    /// the element should be inserted
-    fn lookup_index(&self, element: T) -> usize {
+    /// the element should be inserted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use binmerge::range_tree::RangeTree;
+    /// let range_tree = RangeTree::from_vec(vec![1..2, 3..4, 4..8, 9..10]);
+    /// assert_eq!(range_tree.lookup_index(0), 0);
+    /// assert_eq!(range_tree.lookup_index(1), 0);
+    /// assert_eq!(range_tree.lookup_index(2), 1);
+    /// assert_eq!(range_tree.lookup_index(3), 1);
+    /// assert_eq!(range_tree.lookup_index(4), 2);
+    /// assert_eq!(range_tree.lookup_index(7), 2);
+    /// assert_eq!(range_tree.lookup_index(8), 3);
+    /// assert_eq!(range_tree.lookup_index(9), 3);
+    /// assert_eq!(range_tree.lookup_index(10), 4);
+    /// assert_eq!(range_tree.lookup_index(100), 4);
+    /// ```
+    pub fn lookup_index(&self, element: T) -> usize {
         self.ranges.binary_search_by(|r| {
             if r.end <= element {
                 Ordering::Less
@@ -63,6 +94,7 @@ impl<T: Num + LowerBounded + Copy + Ord + Debug> RangeTree<T> {
     /// Return true if any range of this tree contains the element
     ///
     /// # Examples
+    ///
     /// ```rust
     /// # use binmerge::range_tree::RangeTree;
     /// let range_tree = RangeTree::from_vec(vec![0..2, 3..4, 4..8, 9..10]);
@@ -75,6 +107,14 @@ impl<T: Num + LowerBounded + Copy + Ord + Debug> RangeTree<T> {
     pub fn contains(&self, element: T) -> bool {
         match self.ranges.get(self.lookup_index(element)) {
             Some(range) => range.contains(&element),
+            None => false,
+        }
+    }
+
+    pub fn contains_range_exact(&self, range: Range<T>) -> bool {
+        assert!(range.start <= range.end);
+        match self.ranges.get(self.lookup_index(range.start)) {
+            Some(r) => r.start == range.start && r.end == range.end,
             None => false,
         }
     }
@@ -103,6 +143,22 @@ impl<T: Num + LowerBounded + Copy + Ord + Debug> RangeTree<T> {
             range_tree: self,
             index: dbg!(self.lookup_index(range.start)),
             end: range.end,
+        }
+    }
+
+    /// Remove the passed range from this RangeTree if the exact range was contained, returning
+    /// if it was deleted.
+    ///
+    /// O(n)
+    pub fn remove_range_exact(&mut self, range: Range<T>) -> bool {
+        assert!(range.start <= range.end);
+        let index = self.lookup_index(range.start);
+        match self.ranges.get(index) {
+            Some(r) if r.start == range.start && r.end == range.end => {
+                self.ranges.remove(index);
+                true
+            }
+            Some(_) | None => false,
         }
     }
 }
