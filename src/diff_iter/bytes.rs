@@ -3,7 +3,7 @@ use std::io::{BufReader, Bytes, Read};
 use std::iter::Zip;
 use std::ops::Range;
 
-pub struct DiffIter {
+pub struct BytesDiffIter {
     iter: Zip<Bytes<BufReader<File>>, Bytes<BufReader<File>>>,
     state: State,
 }
@@ -16,18 +16,18 @@ enum State {
     Different(u64, u64),
 }
 
-impl DiffIter {
-    pub fn new(a: File, b: File) -> DiffIter {
+impl BytesDiffIter {
+    pub fn new(a: File, b: File) -> BytesDiffIter {
         let a = BufReader::with_capacity(8*1024*1024, a);
         let b = BufReader::with_capacity(8*1024*1024, b);
-        DiffIter {
+        BytesDiffIter {
             iter: a.bytes().zip(b.bytes()),
             state: State::Equal(0, 0),
         }
     }
 }
 
-impl Iterator for DiffIter {
+impl Iterator for BytesDiffIter {
     type Item = Range<u64>;
 
     fn next(&mut self) -> Option<Self::Item> {

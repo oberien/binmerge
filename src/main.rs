@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Stdout};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use clap::Parser;
 use crossbeam_channel::{Receiver, Select};
@@ -13,7 +14,7 @@ use positioned_io::RandomAccessFile;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use binmerge::diff_iter::DiffIter;
+use binmerge::diff_iter::{BytesDiffIter, MemchrDiffIter, ThreadedDiffIter};
 use binmerge::range_tree::RangeTree;
 
 use crate::diff_view::{DiffView, FileView};
@@ -25,12 +26,26 @@ mod popup;
 
 #[derive(clap::Parser)]
 struct Args {
+    #[clap(long)]
+    bench: Option<Bench>,
     file1: PathBuf,
     file2: PathBuf,
+}
+#[derive(clap::ValueEnum, Copy, Clone)]
+enum Bench {
+    Bytes,
+    Memchr,
+    Threaded,
 }
 
 fn main() {
     let args = Args::parse();
+
+    if args.bench.is_some() {
+        bench(args);
+        return;
+    }
+
     let mut app = App::new(args);
 
     // setup panic hooks
@@ -99,9 +114,9 @@ impl App {
         // diff thread
         let (diff_tx, diff_rx) = crossbeam_channel::unbounded();
         thread::spawn(move || {
-            let diff_iter = DiffIter::new(a2, b2);
-            for part in diff_iter {
-                diff_tx.send(part).unwrap();
+            let diff_iter = ThreadedDiffIter::new(a2, b2);
+            for diff in diff_iter {
+                diff_tx.send(diff).unwrap();
             }
         });
 
@@ -212,4 +227,26 @@ impl AppCtx {
         self.pos -= self.pos % 16;
         assert_eq!(self.pos % 16, 0);
     }
+}
+
+fn bench(args: Args) {
+    let a = File::open(args.file1).unwrap();
+    let b = File::open(args.file2).unwrap();
+    match args.bench.unwrap() {
+        Bench::Bytes => bench_iter(BytesDiffIter::new(a, b)),
+        Bench::Memchr => bench_iter(MemchrDiffIter::new(a, b)),
+        Bench::Threaded => bench_iter(ThreadedDiffIter::new(a, b)),
+    }
+}
+
+fn bench_iter(iter: impl Iterator<Item = Range<u64>>) {
+    let start = Instant::now();
+    let mut count = 0;
+    for diff in iter {
+        println!("{diff:x?}");
+        count += 1;
+    }
+    let elapsed = start.elapsed();
+    println!("Found {count} diffs");
+    eprintln!("Took {}:{}.{:03}", elapsed.as_secs() / 60, elapsed.as_secs() % 60, elapsed.subsec_millis());
 }
