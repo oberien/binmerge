@@ -25,15 +25,7 @@ impl DiffView {
 impl Layer<AppCtx> for DiffView {
     fn handle_key_event(&mut self, ctx: &mut AppCtx, layers: &mut LayerChanges<AppCtx>, evt: KeyEvent) {
         match evt.code {
-            KeyCode::Char('q') => layers.push_layer(PopupYesNo::new(
-                "Quit?",
-                format!(
-                    "Are you sure you want to exit?\nThere are {} unapplied changes.",
-                    ctx.merges_1_into_2.len() + ctx.merges_2_into_1.len(),
-                ),
-                |ctx| ctx.exit = true,
-                |_| (),
-            )),
+            KeyCode::Char('q') => layers.push_layer(QuitPopup::new(ctx)),
             KeyCode::Down => ctx.increase_pos(16),
             KeyCode::Up => ctx.decrease_pos(16),
             KeyCode::PageDown => ctx.increase_pos(ctx.shown_data_height as u64 * 16),
@@ -60,28 +52,7 @@ impl Layer<AppCtx> for DiffView {
                 ctx.merges_2_into_1.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
                 ctx.leave_unmerged.remove_range_exact(ctx.diffs.get(index).unwrap().clone());
             }
-            KeyCode::Char('a') => layers.push_layer(PopupYesNo::new(
-                "Apply Changes?",
-                format!(
-                    concat!(
-                        "Are you sure you want to apply the merges?\n",
-                        "!!!THIS WILL WRITE TO THE FILES!!!\n",
-                        "\n",
-                        "Merged left   <: {:>4}/{total}\n",
-                        "Merged right  >: {:>4}/{total}\n",
-                        "Unchanged     =: {:>4}/{total}\n",
-                        "UNMERGED       : {:>4}/{total}{q}",
-                    ),
-                    ctx.merges_2_into_1.len(),
-                    ctx.merges_1_into_2.len(),
-                    ctx.leave_unmerged.len(),
-                    ctx.diffs.len() - ctx.merges_1_into_2.len() - ctx.merges_2_into_1.len() - ctx.leave_unmerged.len(),
-                    total = ctx.diffs.len(),
-                    q = ctx.all_diffs_loaded.then_some("").unwrap_or("?"),
-                ),
-                |_| todo!(),
-                |_| (),
-            )),
+            KeyCode::Char('a') => layers.push_layer(ApplyChangesPopup::new(ctx)),
             _ => (),
         }
     }
@@ -267,5 +238,48 @@ impl FileView {
         block.render(area, buf);
         Paragraph::new(hex_text).render(hex, buf);
         Paragraph::new(ascii_text).render(ascii, buf);
+    }
+}
+
+enum QuitPopup {}
+impl QuitPopup {
+    pub fn new(ctx: &mut AppCtx) -> PopupYesNo<impl FnMut(&mut AppCtx), impl FnMut(&mut AppCtx)> {
+        PopupYesNo::new(
+            "Quit?",
+            format!(
+                "Are you sure you want to exit?\nThere are {} unapplied changes.",
+                ctx.merges_1_into_2.len() + ctx.merges_2_into_1.len(),
+            ),
+            |ctx| ctx.exit = true,
+            |_| (),
+        )
+    }
+}
+
+enum ApplyChangesPopup {}
+impl ApplyChangesPopup {
+    pub fn new(ctx: &mut AppCtx) -> PopupYesNo<impl FnMut(&mut AppCtx), impl FnMut(&mut AppCtx)> {
+        PopupYesNo::new(
+            "Apply Changes?",
+            format!(
+                concat!(
+                "Are you sure you want to apply the merges?\n",
+                "!!!THIS WILL WRITE TO THE FILES!!!\n",
+                "\n",
+                "Merged left   <: {:>4}/{total}\n",
+                "Merged right  >: {:>4}/{total}\n",
+                "Unchanged     =: {:>4}/{total}\n",
+                "UNMERGED       : {:>4}/{total}{q}",
+                ),
+                ctx.merges_2_into_1.len(),
+                ctx.merges_1_into_2.len(),
+                ctx.leave_unmerged.len(),
+                ctx.diffs.len() - ctx.merges_1_into_2.len() - ctx.merges_2_into_1.len() - ctx.leave_unmerged.len(),
+                total = ctx.diffs.len(),
+                q = ctx.all_diffs_loaded.then_some("").unwrap_or("?"),
+            ),
+            |_| todo!(),
+            |_| (),
+        )
     }
 }
