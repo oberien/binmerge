@@ -59,8 +59,6 @@ fn restore_terminal() {
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 struct App {
-    name1: String,
-    name2: String,
     exit: bool,
     shown_data_height: u16,
     pos: u64,
@@ -68,8 +66,8 @@ struct App {
     diffs: RangeTree<u64>,
     current_diff_index: Option<usize>,
     all_diffs_loaded: bool,
-    file1: RandomAccessFile,
-    file2: RandomAccessFile,
+    file1: FileView,
+    file2: FileView,
     diff_rx: Option<Receiver<Range<u64>>>,
     event_rx: Receiver<Event>,
 }
@@ -112,8 +110,6 @@ impl App {
         });
 
         App {
-            name1: args.file1.to_string_lossy().into_owned(),
-            name2: args.file2.to_string_lossy().into_owned(),
             exit: false,
             shown_data_height: 0,
             pos: 0,
@@ -121,8 +117,8 @@ impl App {
             diffs: RangeTree::new(),
             current_diff_index: None,
             all_diffs_loaded: false,
-            file1: RandomAccessFile::try_new(a).unwrap(),
-            file2: RandomAccessFile::try_new(b).unwrap(),
+            file1: FileView::new(args.file1.to_string_lossy().into_owned(), RandomAccessFile::try_new(a).unwrap()),
+            file2: FileView::new(args.file2.to_string_lossy().into_owned(), RandomAccessFile::try_new(b).unwrap()),
             diff_rx: Some(diff_rx),
             event_rx,
         }
@@ -214,6 +210,10 @@ impl App {
     }
 }
 
+const HEX_PART_LEN: usize = 1 + 8*3 + 1 + 8*3 + 1;
+const ASCII_LEN: usize = 8 + 1 + 8 + 1;
+const WIDTH_PER_FILE: u16 = 1 + HEX_PART_LEN as u16 + ASCII_LEN as u16 + 1;
+
 impl Widget for &mut App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         //      + /foo/bar -----------------------------------------------------------++ baz +
@@ -221,9 +221,6 @@ impl Widget for &mut App {
         // 1340 | ...                                                                 || ... |
         //      +---------------------------------------------------------------------++-----+
         // < overwrite left with right  > overwrite right with left  q quit
-        const HEX_PART_LEN: usize = 1 + 8*3 + 1 + 8*3 + 1;
-        const ASCII_LEN: usize = 8 + 1 + 8 + 1;
-        const WIDTH_PER_FILE: u16 = 1 + HEX_PART_LEN as u16 + ASCII_LEN as u16 + 1;
         let position_len = self.len.ilog(16) as usize + 1;
 
         let all = Layout::new(Direction::Vertical, [
@@ -245,77 +242,6 @@ impl Widget for &mut App {
         let instructions = all[1];
         let status_line = all[2];
 
-        let render_file = |name: &str, file: &RandomAccessFile, height: u16| {
-            let len = height as usize * 16;
-            let mut data = vec![0u8; len];
-            file.read_exact_at(self.pos, &mut data).unwrap();
-            let current_diff_range = self.current_diff_index
-                .and_then(|i| self.diffs.get(i))
-                .cloned()
-                .unwrap_or(0..0);
-
-            let mut text = Text::default();
-            for (line_index, chunk) in data.chunks(16).enumerate() {
-                let mut line = Line::default();
-
-                // write hex
-                line.push_span(" ");
-                let mut written = 1;
-                for (i, byte) in chunk.iter().enumerate() {
-                    let mut span = Span::from(format!("{byte:02x} "));
-                    if self.diffs.contains(self.pos + line_index as u64 * 16 + i as u64) {
-                        span = span.red().bold();
-                    }
-                    if current_diff_range.contains(&(self.pos + line_index as u64 * 16 + i as u64)) {
-                        span = span.on_white();
-                    }
-                    line.push_span(span);
-                    written += 3;
-
-                    // separator space between first 8 and second 8 hex numbers
-                    if i == 7 {
-                        line.push_span(" ");
-                        written += 1;
-                    }
-                }
-                // fill with spaces until ascii part (also handles non-complete chunks)
-                for _ in written..HEX_PART_LEN {
-                    line.push_span(" ");
-                }
-
-                // write ascii
-                for (i, &byte) in chunk.iter().enumerate() {
-                    let mut span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
-                        Span::from((byte as char).to_string())
-                    } else {
-                        Span::from(".")
-                    };
-                    if self.diffs.contains(self.pos + line_index as u64 * 16 + i as u64) {
-                        span = span.red().bold();
-                    }
-                    if current_diff_range.contains(&(self.pos + line_index as u64 * 16 + i as u64)) {
-                        span = span.on_white();
-                    }
-                    line.push_span(span);
-
-                    // separator space between first 8 and second 8 hex numbers
-                    if i == 7 {
-                        line.push_span(" ");
-                        written += 1;
-                    }
-                }
-
-                text.push_line(line);
-            }
-
-            let title = Title::from(format!(" {name} ").bold());
-            let block = Block::default()
-                .title(title.alignment(Alignment::Left))
-                .borders(Borders::ALL)
-                .border_set(border::THICK);
-            Paragraph::new(text).block(block)
-        };
-
         let mut content = String::with_capacity(positions.height as usize * position_len);
         content.push('\n');
         for i in 0..positions.height-2 {
@@ -325,8 +251,12 @@ impl Widget for &mut App {
 
         assert_eq!(left.height, right.height);
         self.shown_data_height = left.height - 2;
-        render_file(&self.name1, &self.file1, left.height - 2).render(left, buf);
-        render_file(&self.name2, &self.file2, right.height - 2).render(right, buf);
+        let current_diff_range = self.current_diff_index
+            .and_then(|i| self.diffs.get(i))
+            .cloned()
+            .unwrap_or(0..0);
+        self.file1.render(left, buf, self.pos, current_diff_range.clone(), &self.diffs);
+        self.file2.render(right, buf, self.pos, current_diff_range.clone(), &self.diffs);
 
         // instructions
         Line::from(vec![
@@ -357,5 +287,81 @@ impl Widget for &mut App {
                 format!("Loading diffs, {} so far", self.diffs.len())
             }.into(),
         ]).render(status_line, buf);
+    }
+}
+
+struct FileView {
+    name: String,
+    file: RandomAccessFile,
+}
+impl FileView {
+    fn new(name: String, file: RandomAccessFile) -> FileView {
+        FileView { name, file }
+    }
+    fn render(&self, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>, diffs: &RangeTree<u64>) where Self: Sized {
+        let len = (area.height as usize - 2) * 16;
+        let mut data = vec![0u8; len];
+        self.file.read_exact_at(pos, &mut data).unwrap();
+
+        let mut text = Text::default();
+        for (line_index, chunk) in data.chunks(16).enumerate() {
+            let mut line = Line::default();
+
+            // write hex
+            line.push_span(" ");
+            let mut written = 1;
+            for (i, byte) in chunk.iter().enumerate() {
+                let mut span = Span::from(format!("{byte:02x} "));
+                if diffs.contains(pos + line_index as u64 * 16 + i as u64) {
+                    span = span.red().bold();
+                }
+                if current_diff_range.contains(&(pos + line_index as u64 * 16 + i as u64)) {
+                    span = span.on_white();
+                }
+                line.push_span(span);
+                written += 3;
+
+                // separator space between first 8 and second 8 hex numbers
+                if i == 7 {
+                    line.push_span(" ");
+                    written += 1;
+                }
+            }
+            // fill with spaces until ascii part (also handles non-complete chunks)
+            for _ in written..HEX_PART_LEN {
+                line.push_span(" ");
+            }
+
+            // write ascii
+            for (i, &byte) in chunk.iter().enumerate() {
+                let mut span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
+                    Span::from((byte as char).to_string())
+                } else {
+                    Span::from(".")
+                };
+                if diffs.contains(pos + line_index as u64 * 16 + i as u64) {
+                    span = span.red().bold();
+                }
+                if current_diff_range.contains(&(pos + line_index as u64 * 16 + i as u64)) {
+                    span = span.on_white();
+                }
+                line.push_span(span);
+
+                // separator space between first 8 and second 8 hex numbers
+                if i == 7 {
+                    line.push_span(" ");
+                    written += 1;
+                }
+            }
+
+            text.push_line(line);
+        }
+
+        let title = Title::from(format!(" {} ", self.name).bold());
+        let block = Block::default()
+            .title(title.alignment(Alignment::Left))
+            .borders(Borders::ALL)
+            .border_set(border::THICK);
+        Paragraph::new(text).block(block).render(area, buf);
     }
 }
