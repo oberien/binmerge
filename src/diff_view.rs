@@ -107,11 +107,11 @@ impl Layer<AppCtx> for DiffView {
             .unwrap_or(0..0);
 
         FileView::render(
-            &ctx.name1, &ctx.file1, left, buf, ctx.pos, current_diff_range.clone(),
+            &ctx.name1, &ctx.file1, left, buf, ctx.pos, ctx.len, current_diff_range.clone(),
             &ctx.diffs, &ctx.merges_2_into_1, &ctx.merges_1_into_2, &ctx.leave_unmerged,
         );
         FileView::render(
-            &ctx.name2, &ctx.file2, right, buf, ctx.pos, current_diff_range.clone(),
+            &ctx.name2, &ctx.file2, right, buf, ctx.pos, ctx.len, current_diff_range.clone(),
             &ctx.diffs, &ctx.merges_1_into_2, &ctx.merges_2_into_1, &ctx.leave_unmerged,
         );
 
@@ -167,11 +167,13 @@ enum FileView {}
 impl FileView {
     #[allow(clippy::too_many_arguments)]
     fn render(
-        name: &str, file: &RandomAccessFile, area: Rect, buf: &mut Buffer, pos: u64, current_diff_range: Range<u64>,
-        diffs: &RangeTree<u64>, merged_into_this: &RangeTree<u64>, merged_from_this: &RangeTree<u64>,
+        name: &str, file: &RandomAccessFile, area: Rect, buf: &mut Buffer, pos: u64, len: u64,
+        current_diff_range: Range<u64>, diffs: &RangeTree<u64>,
+        merged_into_this: &RangeTree<u64>, merged_from_this: &RangeTree<u64>,
         leave_unmerged: &RangeTree<u64>,
     ) {
-        let len = (area.height as usize - 2) * 16;
+        let area_bytes = (area.height as usize - 2) * 16;
+        let len = (area_bytes as u64).min(len - pos) as usize;
         let mut data = vec![0u8; len];
         file.read_exact_at(pos, &mut data).unwrap();
 
