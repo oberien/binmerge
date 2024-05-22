@@ -65,13 +65,13 @@ impl Layer<AppCtx> for DiffView {
 
         const HEX_PART_LEN: usize = 1 + 8*3 + 1 + 8*3 + 1;
         const ASCII_LEN: usize = 1 + 8 + 1 + 8 + 1;
-        const WIDTH_PER_FILE: u16 = 1 + HEX_PART_LEN as u16 + ASCII_LEN as u16 + 1;
+        const WIDTH_PER_FILE: u16 = 1 + HEX_PART_LEN as u16 + ASCII_LEN as u16;
         //      + /foo/bar -----------------------------------------------------------++ baz +
         // 1330 | XX XX XX XX XX XX XX XX  XX XX XX XX XX XX XX XX  12345678 90abcdef || ... |
         // 1340 | ...                                                                 || ... |
         //      +---------------------------------------------------------------------++-----+
         // < overwrite left with right  > overwrite right with left  q quit
-        let position_len = ctx.len.ilog(16) as usize + 1;
+        let position_len = ctx.len.ilog(16) as usize + 2;
 
         let all = Layout::vertical([
             Constraint::Min(1),
