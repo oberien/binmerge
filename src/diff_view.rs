@@ -186,7 +186,7 @@ impl FileView {
             for (i, byte) in chunk.iter().copied().enumerate() {
                 let pos = pos + line_index as u64 * 16 + i as u64;
                 let mut hex_span = Span::from(format!("{byte:02x} "));
-                let mut ascii_span = if byte.is_ascii() && char::from(byte).escape_default().len() == 1 {
+                let mut ascii_span = if 0x21 <= byte && byte <= 0x7e {
                     Span::from((byte as char).to_string())
                 } else {
                     Span::from(".")
