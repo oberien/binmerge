@@ -19,6 +19,8 @@ It helped me restore a broken 2-disk RAID1.
 Not supported (yet?):
 * jump to next/prev unmerged diff
 * jump to next/prev merged diff
+* jump to last position (Ctrl+O)
+* make next/prev go relative to the screen position not to currently selected diff
 * apply changes without closing the editor
 * even faster diff algorithm
 * diff algorithm with insert/delete
